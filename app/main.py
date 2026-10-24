@@ -1,24 +1,22 @@
 
-from app.tools import get_order_by_id, get_orders_by_status
+from app.agent import run_agent
 
 
 def main():
-    print("Welcome to ShopHub Order Support")
+    print("ShopHub Order Support")
+    print("Try: Find order 1001")
+    print("Try: Show paid orders")
+    print("Type 'exit' to quit.")
 
-    print("\n--- Find existing order ---")
-    print(get_order_by_id(1001))
+    while True:
+        user_message = input("\nYou: ").strip()
 
-    print("\n--- Find missing order ---")
-    print(get_order_by_id(9999))
+        if user_message.lower() == "exit":
+            print("Goodbye!")
+            break
 
-    print("\n--- Find order with invalid ID ---")
-    print(get_order_by_id("abc"))
-
-    print("\n--- Find paid orders ---")
-    print(get_orders_by_status("paid"))
-
-    print("\n--- Find orders with invalid status ---")
-    print(get_orders_by_status(""))
+        result = run_agent(user_message)
+        print("Agent:", result)
 
 
 if __name__ == "__main__":
