@@ -1,37 +1,44 @@
 
-from app.fake_llm import fake_llm
-from app.agent import run_agent
+import re
 
 
-def test_fake_llm_selects_order_lookup():
-    decision = fake_llm("Find order 1001")
+def fake_llm(user_message):
+    """Return a scripted tool call for a recognized request."""
 
-    assert decision["tool"] == "get_order_by_id"
-    assert decision["arguments"]["order_id"] == 1001
+    message = user_message.strip().lower()
 
+    # Example: "Find order 1001"
+    order_match = re.search(
+        r"\b(?:find|lookup|look up|show)\s+order\s+(\d+)\b",
+        message,
+    )
 
-def test_fake_llm_selects_status_filter():
-    decision = fake_llm("Show paid orders")
+    if order_match:
+        return {
+            "tool": "get_order_by_id",
+            "arguments": {
+                "order_id": int(order_match.group(1))
+            },
+        }
 
-    assert decision["tool"] == "get_orders_by_status"
-    assert decision["arguments"]["status"] == "paid"
+    # Example: "Show paid orders"
+    status_match = re.search(
+        r"\b(?:show|list|get)\s+(?:all\s+)?"
+        r"(paid|shipped|delivered|placed|cancelled|refunded)"
+        r"\s+orders\b",
+        message,
+    )
 
+    if status_match:
+        return {
+            "tool": "get_orders_by_status",
+            "arguments": {
+                "status": status_match.group(1)
+            },
+        }
 
-def test_fake_llm_handles_unknown_request():
-    decision = fake_llm("Tell me a joke")
-
-    assert decision["tool"] is None
-
-
-def test_agent_executes_selected_tool():
-    result = run_agent("Find order 1001")
-
-    assert result["success"] is True
-    assert result["data"]["id"] == 1001
-
-
-def test_agent_handles_missing_order():
-    result = run_agent("Find order 9999")
-
-    assert result["success"] is False
-    assert result["error"] == "Order not found"
+    return {
+        "tool": None,
+        "arguments": {},
+        "message": "Sorry, I could not understand that request.",
+    }
