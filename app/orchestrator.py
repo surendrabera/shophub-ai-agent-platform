@@ -1,4 +1,4 @@
-
+import os
 import re
 from typing import Any, TypedDict
 from app.security import sanitize_tool_result_for_model
@@ -14,7 +14,10 @@ from fastapi.responses import StreamingResponse
 from langgraph.graph import END, START, StateGraph
 
 
-AGENT_CARD_URL = "http://127.0.0.1:8002/.well-known/agent.json"
+AGENT_CARD_URL = os.getenv(
+    "AGENT_CARD_URL",
+    "http://127.0.0.1:8002/.well-known/agent.json",
+)
 def call_orders_rpc(
     method: str,
     params: dict[str, Any],

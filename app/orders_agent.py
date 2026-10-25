@@ -36,7 +36,9 @@ async def agent_card():
         ),
         "version": "1.0.0",
         "protocol": "JSON-RPC 2.0",
-        "endpoint": "http://127.0.0.1:8002/rpc",
+        "endpoint": os.getenv(
+        "ORDERS_AGENT_RPC_URL",
+        "http://127.0.0.1:8002/rpc", ),
         "skills": [
             {
                 "id": "orders.list",
