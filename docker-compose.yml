@@ -1,0 +1,58 @@
+services:
+  store-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "uvicorn", "app.store_api:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  orders-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "uvicorn", "app.orders_agent:app", "--host", "0.0.0.0", "--port", "8002"]
+    environment:
+      STORE_API_URL: "http://store-api:8001"
+      ORDERS_AGENT_RPC_URL: "http://orders-agent:8002/rpc"
+    ports:
+      - "8002:8002"
+    depends_on:
+      store-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "uvicorn", "app.orchestrator:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      AGENT_CARD_URL: "http://orders-agent:8002/.well-known/agent.json"
+      APPROVAL_DB_PATH: "/app/data/approvals.db"
+    ports:
+      - "8004:8000"
+    volumes:
+      - approval-data:/app/data
+    depends_on:
+      store-api:
+        condition: service_healthy
+      orders-agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  approval-data:
