@@ -1,7 +1,7 @@
 
 import re
 from typing import Any, TypedDict
-
+from app.security import sanitize_tool_result_for_model
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -27,18 +27,27 @@ class ChatRequest(BaseModel):
 
 def fake_llm_router(state: AgentState) -> dict:
     """
-    Deterministic offline router.
+    Route requests deterministically without an external LLM.
 
-    This is a placeholder for an actual LLM. It selects a tool based on
-    simple rules and never executes refund or cancellation operations.
+    Destructive operations are detected before read-only operations.
     """
     query = state["query"]
     normalized = query.lower()
 
-    # Extract an order ID such as 1001 or 2001.
-    order_match = re.search(r"\b(?:order\s*)?(100\d|200\d|9999)\b", normalized)
+    # 1. Check destructive requests first.
+    if re.search(r"\b(refund|cancel|cancellation)\b", normalized):
+        return {
+            "method": "unsupported_action",
+            "params": {},
+        }
 
-    # Handle requests to find a specific order.
+    # 2. Detect supported order IDs.
+    order_match = re.search(
+        r"\b(?:order\s*)?(100\d|200\d|9999)\b",
+        normalized,
+    )
+
+    # 3. Handle requests to look up a specific order.
     if order_match and any(
         word in normalized
         for word in ("lookup", "find", "details", "detail", "status", "order")
@@ -48,7 +57,7 @@ def fake_llm_router(state: AgentState) -> dict:
             "params": {"id": order_match.group(1)},
         }
 
-    # Handle requests to list orders by status.
+    # 4. Handle order listing and status filters.
     statuses = (
         "PLACED",
         "PAID",
@@ -65,6 +74,7 @@ def fake_llm_router(state: AgentState) -> dict:
 
     if any(word in normalized for word in ("list", "show", "all", "orders")):
         params = {}
+
         if requested_status:
             params["status"] = requested_status
 
@@ -73,17 +83,12 @@ def fake_llm_router(state: AgentState) -> dict:
             "params": params,
         }
 
-    # Mutating actions are not executed in this module.
-    if any(word in normalized for word in ("refund", "cancel")):
-        return {
-            "method": "unsupported_action",
-            "params": {},
-        }
-
+    # 5. Don't guess when the request is unclear.
     return {
         "method": "unsupported",
         "params": {},
     }
+
 
 
 def route_node(state: AgentState) -> dict:
@@ -147,8 +152,12 @@ def call_orders_agent_node(state: AgentState) -> dict:
             )
         }
 
-    return {"result": rpc_response.get("result", {})}
+    result = rpc_response.get("result", {})
 
+    # Sanitize customer information before it can reach an LLM.
+    safe_result = sanitize_tool_result_for_model(result)
+
+    return {"result": safe_result}
 
 def format_response_node(state: AgentState) -> dict:
     """Format the tool result as a simple human-readable answer."""
