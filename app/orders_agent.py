@@ -58,6 +58,11 @@ async def agent_card():
                 "name": "Cancel Order",
                 "description": "Request cancellation of an eligible order.",
             },
+                        {
+                "id": "orders.me",
+                "name": "Identify Caller",
+                "description": "Identify the authenticated user and merchant.",
+            },
         ],
     }
 
@@ -98,69 +103,52 @@ async def call_store_api(
         "body": body,
     }
 
-
 async def execute_tool(
     method: str,
-    params: dict[str, Any],
+    params: dict,
     bearer_token: str,
-) -> dict[str, Any]:
-    """
-    Dispatch a JSON-RPC method to the appropriate Store API operation.
-    """
+):
+    if method == "orders.me":
+        return await call_store_api(
+            method="GET",
+            path="/auth/me",
+            bearer_token=bearer_token,
+        )
+
     if method == "orders.list":
-        status = params.get("status")
-
-        query_params = {}
-        if status is not None:
-            query_params["status"] = status
-
         return await call_store_api(
             method="GET",
             path="/orders",
             bearer_token=bearer_token,
-            params=query_params,
+            params=params,
         )
 
     if method == "orders.lookup":
-        order_id = params.get("id")
-
-        if not isinstance(order_id, str) or not order_id.strip():
-            raise ValueError("Parameter 'id' must be a non-empty string")
-
         return await call_store_api(
             method="GET",
             path="/orders/lookup",
             bearer_token=bearer_token,
-            params={"id": order_id},
+            params=params,
         )
 
     if method == "orders.refund":
-        order_id = params.get("id")
-
-        if not isinstance(order_id, str) or not order_id.strip():
-            raise ValueError("Parameter 'id' must be a non-empty string")
-
         return await call_store_api(
             method="POST",
             path="/orders/refund",
             bearer_token=bearer_token,
-            json_body={"id": order_id},
+            json_body=params,
         )
 
     if method == "orders.cancel":
-        order_id = params.get("id")
-
-        if not isinstance(order_id, str) or not order_id.strip():
-            raise ValueError("Parameter 'id' must be a non-empty string")
-
         return await call_store_api(
             method="POST",
             path="/orders/cancel",
             bearer_token=bearer_token,
-            json_body={"id": order_id},
+            json_body=params,
         )
 
-    raise LookupError(f"Unknown method: {method}")
+    raise ValueError(f"Unsupported tool: {method}")
+
 
 
 @app.post("/rpc")

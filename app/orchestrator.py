@@ -5,6 +5,8 @@ from app.security import sanitize_tool_result_for_model
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
+from fastapi import Body
+from app import approval_store
 from langgraph.graph import END, START, StateGraph
 
 
@@ -23,7 +25,8 @@ class AgentState(TypedDict, total=False):
 
 class ChatRequest(BaseModel):
     message: str
-
+class ApprovalDecisionRequest(BaseModel):
+    decision: str
 
 def fake_llm_router(state: AgentState) -> dict:
     """
@@ -281,3 +284,335 @@ def chat(
         )
 
     return {"answer": state.get("answer", "No answer was produced.")}
+@app.post("/approvals/propose")
+def propose_order_action(
+    request: ChatRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Create a refund or cancellation proposal without executing it."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Bearer token",
+        )
+
+    action_match = re.search(
+        r"\b(refund|cancel|cancellation)\b",
+        request.message.lower(),
+    )
+
+    if not action_match:
+        raise HTTPException(
+            status_code=400,
+            detail="Please specify a refund or cancellation request.",
+        )
+
+    action = action_match.group(1)
+    action = "cancel" if action in {"cancel", "cancellation"} else "refund"
+
+    order_match = re.search(
+        r"\b(?:order\s*)?(100\d|200\d|9999)\b",
+        request.message.lower(),
+    )
+
+    if not order_match:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a valid order ID.",
+        )
+
+    order_id = order_match.group(1)
+
+    result = call_orders_rpc(
+        "orders.lookup",
+        {"id": order_id},
+        authorization,
+    )
+
+    if result.get("http_status") != 200:
+        raise HTTPException(
+            status_code=404,
+            detail="Order could not be retrieved.",
+        )
+
+    body = result.get("body", {})
+
+    if not isinstance(body, dict) or body.get("status") is not True:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found in your store.",
+        )
+
+    order = body["order"]
+    status = order.get("status")
+
+    if action == "refund" and status != "PAID":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot propose a refund for an order with status {status}.",
+        )
+
+    if action == "cancel" and status not in {"PLACED", "PAID"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot propose cancellation for an order with status {status}.",
+        )
+
+    proposal = approval_store.create_proposal(
+        order_id=order_id,
+        merchant_id=order["merchant"],
+        action=action,
+        amount=order["total"] if action == "refund" else None,
+    )
+
+    return {
+        "message": "Approval required. No order action has been executed.",
+        "proposal": proposal,
+        "order": {
+            "id": order["id"],
+            "merchant": order["merchant"],
+            "status": order["status"],
+            "amount": order["total"] if action == "refund" else None,
+        },
+    }
+
+@app.post("/approvals/propose")
+def propose_order_action(
+    request: ChatRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Create a refund or cancellation proposal without executing it."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Bearer token",
+        )
+
+    action_match = re.search(
+        r"\b(refund|cancel|cancellation)\b",
+        request.message.lower(),
+    )
+
+    if not action_match:
+        raise HTTPException(
+            status_code=400,
+            detail="Please specify a refund or cancellation request.",
+        )
+
+    action = action_match.group(1)
+    action = "cancel" if action in {"cancel", "cancellation"} else "refund"
+
+    order_match = re.search(
+        r"\b(?:order\s*)?(100\d|200\d|9999)\b",
+        request.message.lower(),
+    )
+
+    if not order_match:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide a valid order ID.",
+        )
+
+    order_id = order_match.group(1)
+
+    result = call_orders_rpc(
+        "orders.lookup",
+        {"id": order_id},
+        authorization,
+    )
+
+    if result.get("http_status") != 200:
+        raise HTTPException(
+            status_code=404,
+            detail="Order could not be retrieved.",
+        )
+
+    body = result.get("body", {})
+
+    if not isinstance(body, dict) or body.get("status") is not True:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found in your store.",
+        )
+
+    order = body["order"]
+    status = order.get("status")
+
+    if action == "refund" and status != "PAID":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot propose a refund for an order with status {status}.",
+        )
+
+    if action == "cancel" and status not in {"PLACED", "PAID"}:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot propose cancellation for an order with status {status}.",
+        )
+
+    proposal = approval_store.create_proposal(
+        order_id=order_id,
+        merchant_id=order["merchant"],
+        action=action,
+        amount=order["total"] if action == "refund" else None,
+    )
+
+    return {
+        "message": "Approval required. No order action has been executed.",
+        "proposal": proposal,
+        "order": {
+            "id": order["id"],
+            "merchant": order["merchant"],
+            "status": order["status"],
+            "amount": order["total"] if action == "refund" else None,
+        },
+    }
+
+@app.post("/approvals/{proposal_id}/decision")
+def decide_order_action(
+    proposal_id: str,
+    request: ApprovalDecisionRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Approve or reject a proposal for the authenticated merchant."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Bearer token",
+        )
+
+    decision = request.decision.lower()
+
+    if decision not in {"approved", "rejected"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Decision must be 'approved' or 'rejected'.",
+        )
+
+    # Identify the caller using the Store API, not a client-supplied merchant ID.
+    identity_result = call_orders_rpc(
+        "orders.me",
+        {},
+        authorization,
+    )
+
+    identity_body = identity_result.get("body", {})
+
+    if identity_result.get("http_status") != 200:
+        raise HTTPException(
+            status_code=403,
+            detail="Could not verify the caller's merchant.",
+        )
+
+    merchant_id = identity_body.get("merchant")
+
+    if not merchant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Caller is not associated with a merchant.",
+        )
+
+    proposal = approval_store.get_proposal(proposal_id)
+
+    if proposal is None or proposal["merchant_id"] != merchant_id:
+        # Do not disclose whether another merchant owns this proposal.
+        raise HTTPException(
+            status_code=404,
+            detail="Approval proposal not found.",
+        )
+
+    decided = approval_store.decide_proposal(
+        proposal_id=proposal_id,
+        merchant_id=merchant_id,
+        decision=decision,
+    )
+
+    if decided is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Proposal is no longer pending or has already been decided.",
+        )
+
+    if decision == "rejected":
+        return {
+            "message": "Proposal rejected. No order action was executed.",
+            "proposal": decided,
+        }
+
+    # Re-fetch the order before executing the approved action.
+    lookup_result = call_orders_rpc(
+        "orders.lookup",
+        {"id": proposal["order_id"]},
+        authorization,
+    )
+
+    lookup_body = lookup_result.get("body", {})
+
+    if (
+        lookup_result.get("http_status") != 200
+        or not isinstance(lookup_body, dict)
+        or lookup_body.get("status") is not True
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Order is no longer accessible. Action was not executed.",
+        )
+
+    current_order = lookup_body["order"]
+
+    if current_order.get("merchant") != merchant_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Merchant ownership verification failed.",
+        )
+
+    # Verify the proposal still matches the order's current state.
+    if proposal["action"] == "refund":
+        if (
+            current_order.get("status") != "PAID"
+            or current_order.get("total") != proposal["amount"]
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Order details changed. A new proposal is required.",
+            )
+        rpc_method = "orders.refund"
+
+    else:
+        if current_order.get("status") not in {"PLACED", "PAID"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Order can no longer be cancelled.",
+            )
+        rpc_method = "orders.cancel"
+
+    execution_result = call_orders_rpc(
+        rpc_method,
+        {"id": proposal["order_id"]},
+        authorization,
+    )
+
+    if execution_result.get("http_status") != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The action could not be confirmed by the Store API. "
+                "Check the order status before retrying."
+            ),
+        )
+
+    execution_body = execution_result.get("body", {})
+
+    if not isinstance(execution_body, dict) or execution_body.get("success") is not True:
+        raise HTTPException(
+            status_code=409,
+            detail="The Store API did not confirm that the action succeeded.",
+        )
+
+    approval_store.mark_proposal_executed(proposal_id)
+
+    return {
+        "message": "Approved action executed successfully.",
+        "proposal": approval_store.get_proposal(proposal_id),
+        "result": execution_body,
+    }
