@@ -11,6 +11,48 @@ from langgraph.graph import END, START, StateGraph
 
 
 AGENT_CARD_URL = "http://127.0.0.1:8002/.well-known/agent.json"
+def call_orders_rpc(
+    method: str,
+    params: dict[str, Any],
+    authorization: str,
+) -> dict[str, Any]:
+    """Discover the Orders Agent and call its JSON-RPC endpoint."""
+    with httpx.Client(timeout=10.0) as client:
+        # Discover the sub-agent dynamically from its agent card.
+        card_response = client.get(AGENT_CARD_URL)
+        card_response.raise_for_status()
+        agent_card = card_response.json()
+
+        endpoint = agent_card.get("endpoint")
+        if not endpoint:
+            raise ValueError("Orders agent card has no endpoint")
+
+        rpc_request = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1,
+        }
+
+        response = client.post(
+            endpoint,
+            json=rpc_request,
+            headers={"Authorization": authorization},
+        )
+        response.raise_for_status()
+        rpc_response = response.json()
+
+    if "error" in rpc_response:
+        error = rpc_response["error"]
+        raise ValueError(
+            error.get("message", "Orders Agent returned an error")
+        )
+
+    result = rpc_response.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("Orders Agent returned an invalid JSON-RPC result")
+
+    return result
 
 
 class AgentState(TypedDict, total=False):
