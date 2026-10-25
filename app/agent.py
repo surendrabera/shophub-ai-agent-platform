@@ -6,10 +6,10 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.fake_llm import fake_llm
-from app.tools import get_order_by_id, get_orders_by_status
+from app.http_tools import get_order_by_id, get_orders_by_status
 
 
-# 1. Register the tools available to the agent.
+
 TOOL_REGISTRY = {
     "get_order_by_id": {
         "function": get_order_by_id,
@@ -28,33 +28,53 @@ class AgentState(TypedDict, total=False):
     tool_name: str | None
     arguments: dict[str, Any]
     result: dict[str, Any]
-
+    last_order_id: int
+    authorization: str
 
 # 3. Validate and execute a registered tool.
-def execute_tool(tool_name, arguments):
+def execute_selected_tool(state: AgentState):
+    tool_name = state["tool_name"]
+    arguments = state.get("arguments", {})
+    authorization = state.get("authorization")
+
+    if not isinstance(authorization, str) or not authorization.startswith("Bearer "):
+        return {
+            "result": {
+                "success": False,
+                "data": None,
+                "error": "Missing or invalid authorization header",
+            }
+        }
+
     tool_definition = TOOL_REGISTRY.get(tool_name)
 
     if tool_definition is None:
         return {
-            "success": False,
-            "data": None,
-            "error": "Unknown tool",
+            "result": {
+                "success": False,
+                "data": None,
+                "error": "Unknown tool",
+            }
         }
 
     if not isinstance(arguments, dict):
         return {
-            "success": False,
-            "data": None,
-            "error": "Tool arguments must be a dictionary",
+            "result": {
+                "success": False,
+                "data": None,
+                "error": "Tool arguments must be a dictionary",
+            }
         }
 
     required_arguments = tool_definition["required_arguments"]
 
     if set(arguments) != set(required_arguments):
         return {
-            "success": False,
-            "data": None,
-            "error": "Invalid tool arguments",
+            "result": {
+                "success": False,
+                "data": None,
+                "error": "Invalid tool arguments",
+            }
         }
 
     for name, expected_type in required_arguments.items():
@@ -67,20 +87,35 @@ def execute_tool(tool_name, arguments):
 
         if not valid:
             return {
-                "success": False,
-                "data": None,
-                "error": f"Invalid type for argument: {name}",
+                "result": {
+                    "success": False,
+                    "data": None,
+                    "error": f"Invalid type for argument: {name}",
+                }
             }
 
     try:
-        return tool_definition["function"](**arguments)
+        result = tool_definition["function"](
+            **arguments,
+            authorization=authorization,
+        )
     except Exception:
-        return {
+        result = {
             "success": False,
             "data": None,
             "error": "Tool execution failed",
         }
 
+    updates = {"result": result}
+
+    if (
+        result.get("success")
+        and isinstance(result.get("data"), dict)
+        and "id" in result["data"]
+    ):
+        updates["last_order_id"] = result["data"]["id"]
+
+    return updates
 
 # 4. Node: Select a tool using the fake LLM.
 def select_tool(state: AgentState):
@@ -158,9 +193,13 @@ agent_graph = builder.compile(
 
 
 # 8. Invoke the graph.
-def run_agent(user_message: str, thread_id: str = "default"):
+def run_agent(
+    user_message: str,
+    authorization: str,
+    thread_id: str = "default",
+):
     final_state = agent_graph.invoke(
-        {"user_message": user_message},
+        {"user_message": user_message, "authorization": authorization},
         config={
             "configurable": {
                 "thread_id": thread_id,
