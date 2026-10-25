@@ -7,6 +7,10 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 from fastapi import Body
 from app import approval_store
+import asyncio
+import json
+
+from fastapi.responses import StreamingResponse
 from langgraph.graph import END, START, StateGraph
 
 
@@ -326,6 +330,82 @@ def chat(
         )
 
     return {"answer": state.get("answer", "No answer was produced.")}
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    authorization: str | None = Header(default=None),
+):
+    """Stream progress and the final answer using Server-Sent Events."""
+
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid Bearer token",
+        )
+
+    async def event_stream():
+        def send_event(event_name: str, data: dict) -> str:
+            return (
+                f"event: {event_name}\n"
+                f"data: {json.dumps(data)}\n\n"
+            )
+
+        yield send_event(
+            "status",
+            {"message": "Processing your request."},
+        )
+
+        try:
+            yield send_event(
+                "status",
+                {"message": "Contacting the Orders Sub-Agent."},
+            )
+
+            state = await asyncio.to_thread(
+                orchestrator_graph.invoke,
+                {
+                    "query": request.message,
+                    "authorization": authorization,
+                },
+            )
+
+            yield send_event(
+                "final",
+                {
+                    "answer": state.get(
+                        "answer",
+                        "No answer was produced.",
+                    )
+                },
+            )
+
+        except httpx.RequestError:
+            yield send_event(
+                "error",
+                {"message": "Could not reach the Orders Sub-Agent."},
+            )
+
+        except (ValueError, httpx.HTTPStatusError):
+            yield send_event(
+                "error",
+                {"message": "Could not complete the order request."},
+            )
+
+        except Exception:
+            yield send_event(
+                "error",
+                {"message": "An unexpected error occurred."},
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 @app.post("/approvals/propose")
 def propose_order_action(
     request: ChatRequest,
