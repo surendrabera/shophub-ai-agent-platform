@@ -1,4 +1,4 @@
-```python
+
 import os
 from typing import Any
 
@@ -239,4 +239,3 @@ async def json_rpc_endpoint(
             "Store API is unavailable",
             status_code=502,
         )
-```
