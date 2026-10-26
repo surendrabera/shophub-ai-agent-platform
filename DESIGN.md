@@ -1,251 +1,122 @@
 # ShopHub AI Agent Platform — Technical Design
 
-## 1. Purpose
+## 1. Overview
 
-ShopHub AI Agent Platform demonstrates a multi-tenant e-commerce support system. It allows authenticated support agents to retrieve order information through a central orchestrator and a separate Orders Sub-Agent. It also demonstrates approval-controlled refunds and cancellations.
+ShopHub is a multi-tenant e-commerce support platform built with Python, FastAPI, and LangGraph. It demonstrates order lookup, inter-agent communication, merchant-level authorization, and approval-controlled refunds and cancellations.
 
-The initial implementation uses a deterministic fake LLM/router, allowing the application to run without an external LLM API key.
+The implementation uses a deterministic fake LLM/router so it runs locally without an external model API key. Docker Compose runs the three services.
 
-## 2. Architecture Overview
+## 2. Architecture and Request Flow
 
-The application consists of three services.
+**Store API — port 8001**
 
-### 2.1 Store API
+- Authenticates demonstration bearer tokens and maps them to merchant identities.
+- Maintains mock merchant and order data.
+- Enforces merchant-level access restrictions and exposes order operations.
 
-**Port:** 8001
+**Orders Sub-Agent — port 8002**
 
-Responsibilities:
-- Authenticate demo bearer tokens.
-- Associate callers with merchant identities.
-- Provide order lookup and listing operations.
-- Support eligible refund and cancellation operations.
-- Enforce merchant-level order access restrictions.
+- Publishes agent metadata at `/.well-known/agent.json`.
+- Exposes a JSON-RPC 2.0 endpoint at `/rpc`.
+- Forwards the caller's authorization header to the Store API.
 
-### 2.2 Orders Sub-Agent
+**Orchestrator — host port 8004**
 
-**Port:** 8002
+- Uses LangGraph to coordinate request processing.
+- Discovers the Orders Sub-Agent using its agent card.
+- Calls the sub-agent over HTTP and JSON-RPC.
+- Provides chat, SSE streaming, and approval endpoints.
+- Persists approval proposals in SQLite.
 
-Responsibilities:
-- Expose agent metadata through `/.well-known/agent.json`.
-- Accept requests through the `/rpc` JSON-RPC endpoint.
-- Forward authorized requests to the Store API.
-- Pass the caller's authorization header to the Store API.
+### Typical order lookup
 
-### 2.3 Orchestrator
+1. The client sends a chat request and bearer token to the Orchestrator.
+2. LangGraph routes the request using deterministic logic.
+3. The Orchestrator discovers and calls the Orders Sub-Agent over HTTP using JSON-RPC.
+4. The sub-agent forwards the authorization token to the Store API.
+5. The Store API authenticates the caller and checks merchant ownership.
+6. The result returns through the sub-agent to the Orchestrator and then to the client.
 
-**Host port:** 8004  
-**Container port:** 8000
+The sub-agent is called over HTTP rather than imported directly into the Orchestrator. This demonstrates service separation and a structured inter-agent interface. It should not be described as a complete implementation of every formal A2A protocol feature.
 
-Responsibilities:
-- Accept user requests through the chat API.
-- Use LangGraph to coordinate request processing.
-- Route requests using deterministic fake LLM/router logic.
-- Communicate with the Orders Sub-Agent over HTTP and JSON-RPC.
-- Provide Server-Sent Events (SSE) streaming.
-- Create and process approval proposals.
-- Persist approval records in SQLite.
+## 3. Security and Approval Workflow
 
-## 3. Request Flow
+The Store API is responsible for enforcing merchant-level access. A caller must not be able to retrieve another merchant's order by changing an order identifier. Tokens without an associated merchant must not access merchant orders.
 
-A typical order-status request follows this sequence:
+Customer-provided text is treated as untrusted input. Security-related sanitization helps reduce prompt-injection risk, and sensitive customer information should be redacted before model-facing processing.
 
-1. The client submits a request to the Orchestrator with a bearer token.
-2. The Orchestrator processes the request through its LangGraph workflow.
-3. The request is routed to the Orders Sub-Agent.
-4. The Orders Sub-Agent forwards the request and authorization header to the Store API.
-5. The Store API authenticates the caller and checks merchant-level access.
-6. The result travels back through the Orders Sub-Agent to the Orchestrator.
-7. The Orchestrator returns a customer-facing answer.
+Refunds and cancellations require an explicit approval decision:
 
-The Orchestrator communicates with the Sub-Agent through HTTP requests rather than directly importing its application code.
+1. The client submits an approval proposal.
+2. The system records the proposed action and relevant order information.
+3. The proposal can be approved or rejected.
+4. Rejected proposals must not execute the requested operation.
+5. Approved actions are revalidated before execution.
 
-## 4. LangGraph Orchestration
+The current implementation uses demonstration credentials and mock data. Before production use, approval transitions and financial operations would need stronger transaction guarantees, concurrency controls, idempotency, and audit logging.
 
-LangGraph is used to represent request processing as a graph-based workflow.
+## 4. Persistence and Deployment
 
-The workflow maintains request state and coordinates the processing steps. The Orchestrator uses deterministic routing logic rather than a live LLM in this implementation.
+SQLite stores approval proposals. The approval database path is configurable through `APPROVAL_DB_PATH`, and Docker Compose configures a named volume for persistent approval data.
 
-This approach makes the demo reproducible and testable without requiring an external model service.
-
-The exact nodes, edges, state fields, and routing conditions are defined in `app/orchestrator.py`.
-
-## 5. Inter-Agent Communication
-
-The Orders Sub-Agent exposes a JSON-RPC 2.0 endpoint at `/rpc`.
-
-JSON-RPC provides a structured request-and-response format for invoking methods on the Sub-Agent.
-
-The agent metadata is available at:
-
-`GET http://localhost:8002/.well-known/agent.json`
-
-The Orchestrator uses the configured agent-card URL to discover the Sub-Agent metadata.
-
-**Protocol scope:** The project demonstrates agent-to-agent communication using HTTP and JSON-RPC with an agent card. This should not automatically be described as a complete implementation of every feature in a formal A2A protocol specification. MCP integration should likewise not be claimed unless implemented separately.
-
-## 6. Authentication and Tenant Isolation
-
-The demo uses bearer tokens to identify the calling support agent and associated merchant.
-
-Example tokens:
-
-| Token | Merchant |
-|---|---|
-| `token-merchant-a-demo` | `merchant_a` |
-| `token-merchant-b-demo` | `merchant_b` |
-| `token-no-merchant-demo` | No merchant assigned |
-
-The Orders Sub-Agent forwards the caller's authorization header to the Store API so the Store API can enforce access restrictions.
-
-A caller should not be able to access another merchant's orders by changing an order identifier.
-
-The demo uses hardcoded tokens and mock data. Production deployment would require a proper identity provider, managed secrets, and stronger authorization controls.
-
-## 7. Approval-Controlled Actions
-
-Refunds and cancellations are sensitive operations. The application provides an approval proposal workflow.
-
-### 7.1 Proposal creation
-
-The client submits a proposal to the Orchestrator. The proposal records information such as the order, merchant, action, amount where applicable, and current proposal status.
-
-### 7.2 Decision
-
-An authorized decision is submitted through the approval decision endpoint.
-
-- **Rejected:** The proposal is marked rejected and the proposed order action is not executed.
-- **Approved:** The application revalidates the order and relevant conditions before attempting the action.
-
-### 7.3 Execution
-
-When the action is approved and validation succeeds, the Orchestrator requests the corresponding operation through the agent and Store API layers.
-
-The proposal status records the workflow outcome.
-
-The implementation details and status transitions are defined in `app/orchestrator.py` and `app/approval_store.py`.
-
-## 8. SQLite Persistence
-
-Approval proposals are stored in SQLite.
-
-The database location is configurable through `APPROVAL_DB_PATH`. Docker Compose configures persistent storage under `/app/data` using a named volume.
-
-The named volume allows stored approval records to survive container replacement, provided the volume is retained.
-
-SQLite is appropriate for a small, self-contained demonstration. A production deployment with concurrent workloads may require a managed database and explicit concurrency and transaction strategies.
-
-## 9. Security Considerations
-
-The project demonstrates several security-oriented controls:
-- Bearer-token authentication.
-- Merchant-level authorization.
-- Authorization propagation across service boundaries.
-- Output sanitization and handling of potentially malicious prompt-injection content.
-- Approval before sensitive operations.
-- Revalidation before approved actions are executed.
-
-These controls should not be interpreted as a complete production security assessment.
-
-Further work should include:
-- Strong identity and access management.
-- Secret management and credential rotation.
-- Input validation and request-size limits.
-- Idempotency for financial operations.
-- Concurrency-safe approval transitions.
-- Audit logging and monitoring.
-- Careful handling and redaction of customer personal information.
-- Tests for duplicate, stale, and conflicting approval requests.
-
-## 10. Error Handling and Reliability
-
-The services communicate over HTTP. Network failures, authorization failures, invalid requests, and downstream errors should be handled without incorrectly reporting successful business operations.
-
-The current behavior is implemented in the service endpoint handlers and request-processing logic.
-
-Production readiness would require clearly defined timeout and retry policies, structured logs, service-level metrics, distributed tracing, and tests for downstream outages.
-
-Retries for refunds and cancellations should be designed carefully to avoid duplicate operations.
-
-## 11. Streaming
-
-The Orchestrator exposes `POST /chat/stream`.
-
-The endpoint uses Server-Sent Events to send progress updates and a final response to the client.
-
-This allows clients to receive processing status before the final answer.
-
-## 12. Deployment
-
-Docker Compose runs the three services:
-- Store API on host port 8001.
-- Orders Sub-Agent on host port 8002.
-- Orchestrator on host port 8004.
-
-The service configuration uses container-network addresses for communication between containers.
+SQLite is appropriate for a small local demonstration because it is simple to configure and requires no separate database service. A production system with concurrent requests may need a managed database and explicit transaction and locking strategies.
 
 Start the application:
 
-```powershell
-docker compose up --build -d
 ```
-
-Check service status:
-
-```powershell
+docker compose up --build -d
 docker compose ps
 ```
 
-Stop the application:
+Run the automated tests:
 
-```powershell
-docker compose down
 ```
-
-Avoid `docker compose down -v` when you need to preserve the named approval-data volume.
-
-## 13. Testing
-
-Run the automated tests from the repository root:
-
-```powershell
 python -m pytest -v
 ```
 
-The test suite includes tests for orchestration, Store API behavior, security, approval persistence, and evaluation scenarios.
+Run the five-scenario evaluation harness with the services running:
 
-Automated tests should be supplemented with integration tests against the running Docker services.
+```
+python scripts/run_evaluation.py
+```
 
-## 14. Known Limitations
+The evaluation scenarios cover order lookup, unknown orders, cross-merchant access, approval requirements, and rejected refunds. The harness uses the local Orchestrator API and does not require an external LLM API key.
 
-- The LLM/router is deterministic and does not invoke a live language model.
-- The Store API uses mock data.
-- Authentication uses hardcoded demonstration tokens.
-- SQLite is used for approval persistence.
-- The system demonstrates HTTP and JSON-RPC communication between agents, but should not be presented as a complete A2A implementation without further verification.
-- MCP support should not be claimed unless an MCP server or client integration is implemented.
-- Production-grade observability, identity management, and concurrency controls require further work.
+The `/chat/stream` endpoint uses Server-Sent Events to return processing updates and a final response. The precise event types depend on the implementation.
 
-## 15. Future Improvements
+## 5. Design Trade-offs and Limitations
 
-Potential improvements include:
-- Integrating a real LLM with constrained tool calling.
-- Adding robust observability and distributed tracing.
-- Improving identity management and secrets handling.
-- Adding idempotency and concurrency-safe approval execution.
-- Expanding integration and failure-injection testing.
-- Adding continuous integration and deployment automation.
-- Evaluating a production database for approval persistence.
+**Deterministic routing instead of a live LLM:** This makes behavior reproducible, offline, and easy to test. It does not demonstrate the full uncertainty or flexibility of a production language model.
 
-## 16. Key Source Files
+**Separate Orders Sub-Agent:** HTTP and JSON-RPC provide a clear service boundary, at the cost of network latency and additional failure modes.
 
-| File | Responsibility |
-|---|---|
-| `app/orchestrator.py` | LangGraph orchestration, chat endpoints, streaming, and approval workflow |
-| `app/orders_agent.py` | Orders Sub-Agent and JSON-RPC interface |
-| `app/store_api.py` | Mock Store API and merchant authorization |
-| `app/approval_store.py` | SQLite approval persistence |
-| `app/security.py` | Security-related sanitization functions |
-| `docker-compose.yml` | Multi-service configuration |
-| `Dockerfile` | Container image build |
-| `requirements.txt` | Python dependencies |
-| `tests/` | Automated tests |
+**SQLite instead of a managed database:** This reduces local setup and operational overhead but limits the design's suitability for high-concurrency production workloads.
+
+**Mock Store API:** This enables repeatable tests without external systems, but does not represent real payment processing or a production commerce backend.
+
+**Demonstration authentication:** Hardcoded tokens simplify testing but are not suitable for production identity management.
+
+The project demonstrates HTTP/JSON-RPC agent communication; MCP integration should not be claimed unless implemented separately. Likewise, streaming should not be described as emitting tool-started and tool-finished events unless those events are implemented and tested.
+
+### Rough cost and latency estimates
+
+These are planning estimates, not measured benchmark results.
+
+- **Local demonstration:** No external LLM API cost. Runtime costs are limited to the developer's machine and Docker resources.
+- **Order lookup latency:** A simple local request may take tens to hundreds of milliseconds, depending on startup state, database access, and HTTP overhead. Measure actual latency before making performance claims.
+- **Production LLM cost:** Depends on the chosen model, token volume, request rate, and model pricing. No reliable estimate can be made until these inputs are defined.
+- **Production infrastructure:** Costs would depend on service replicas, database choice, observability, hosting region, and traffic.
+
+## 6. Next-Week Plan
+
+1. **Reliability:** Add tests for Store API outages, timeouts, invalid downstream responses, and failed approval execution.
+2. **Approval safety:** Implement and test atomic state transitions, idempotency, and safe handling of duplicate or concurrent decisions.
+3. **Streaming:** Emit and test explicit tool-started and tool-finished events if required by the interface.
+4. **Persistence:** Verify conversation-state persistence across container recreation, separately from approval persistence.
+5. **Observability:** Add structured logs, request correlation IDs, and basic latency/error measurements.
+6. **Evaluation:** Expand scripted scenarios and assert actual order state as well as proposal state.
+7. **Production planning:** Evaluate identity management, secrets handling, a managed database, and an optional real-LLM integration.
+
+## 7. AI Coding Assistant Disclosure
+
+An AI coding assistant was used during development to help explain technical concepts, review design choices, troubleshoot implementation issues, and support test and documentation development. The author remains responsible for reviewing the code, validating behavior, and understanding the final implementation.
