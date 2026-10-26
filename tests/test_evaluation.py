@@ -1,4 +1,3 @@
-
 from fastapi.testclient import TestClient
 
 from app import approval_store
@@ -23,7 +22,7 @@ def fake_graph_result(answer):
 def test_eval_01_lookup_order_status(monkeypatch):
     """A chat response can report an order's status."""
 
-    def fake_invoke(state):
+    def fake_invoke(state, config=None):
         assert state["query"] == "What is the status of order 1002?"
         assert state["authorization"] == MERCHANT_A_HEADERS["Authorization"]
         return fake_graph_result(
@@ -50,7 +49,7 @@ def test_eval_01_lookup_order_status(monkeypatch):
 def test_eval_02_unknown_order_is_not_found(monkeypatch):
     """Unknown orders receive a not-found response."""
 
-    def fake_invoke(state):
+    def fake_invoke(state, config=None):
         return fake_graph_result("Order 9999 was not found.")
 
     monkeypatch.setattr(
@@ -72,7 +71,7 @@ def test_eval_02_unknown_order_is_not_found(monkeypatch):
 def test_eval_03_foreign_order_is_not_disclosed(monkeypatch):
     """The response does not disclose another merchant's order."""
 
-    def fake_invoke(state):
+    def fake_invoke(state, config=None):
         assert state["authorization"] == MERCHANT_A_HEADERS["Authorization"]
         return fake_graph_result("Order 2001 was not found.")
 
@@ -209,4 +208,3 @@ def test_eval_05_rejected_refund_is_not_executed(monkeypatch, tmp_path):
 
     saved = approval_store.get_proposal(proposal["proposal_id"])
     assert saved["status"] == "rejected"
-
